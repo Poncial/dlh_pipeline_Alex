@@ -54,5 +54,4 @@ check_logs <- function(con,
 # Code --------------------------------------------------------------------
 
 con <- pipelineR::connect_db()
-check_logs(con, 
-           output_file = "test/pipeline_report.txt")
+check_logs(con)
