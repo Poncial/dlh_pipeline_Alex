@@ -2,56 +2,98 @@
 # Packages ----------------------------------------------------------------
 library(pipelineR)
 library(DBI)
-library(dplyr)
-library(glue)
-library(lubridate)
+library(data.table)
 
 # Function ----------------------------------------------------------------
 # Function are stored in this script because i don't want to store it on the package pipelineR
 # PipelineR is public so it would mean providing you the solution
 # However, in a 'profesional' environment, you should store the function in a package
 
-check_logs <- function(con, 
-                       timestamp = now() - hours(24), 
-                       output_file = "/var/jenkins_home/my_logs/pipeline_report.txt"){
+checkLogs <- function(outputFile = "output.md") {
+  # Connect to the database
+  con <- connect_db()
   
-  query <- glue::glue_sql(
-    "SELECT * FROM el_professor.pipeline_logs WHERE timestamp >= {timestamp}",
-    .con = con
-  )
+  # Ensure disconnection even in case of error
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
   
-  logs_tbl <- DBI::dbGetQuery(con, query)
+  # Read the table
+  db <- DBI::dbGetQuery(
+    conn = con,
+    statement = "SELECT * FROM student_alexandre.pipeline_logs ORDER BY id ASC LIMIT 100"
+  ) |> data.table::as.data.table()
   
-  # Prepare the report content
-  n_total <- nrow(logs_tbl)
-  n_success <- sum(logs_tbl$status == "ok", na.rm = TRUE)
-  n_failure <- sum(logs_tbl$status == "ko", na.rm = TRUE)
+  # Define limit time
+  limitTime <- Sys.time() - 24 * 3600
   
-  errors <- logs_tbl |>
-    dplyr::filter(status == "ko") |>
-    dplyr::select(id, timestamp, message)
+  # Filter logs from the last 24h
+  db[, timestamp := as.POSIXct(timestamp)]
+  db24h <- db[timestamp >= limitTime]
   
-  report_text <- paste0(
-    "Pipeline Monitoring Report - ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n",
-    "-----------------------------------------\n",
-    "Total executions (last 24 hours): ", n_total, "\n",
-    "Successes: ", n_success, "\n",
-    "Failures: ", n_failure, "\n",
-    if (n_failure > 0) {
-      paste0("\nFailures detected:\n", paste(apply(errors, 1, function(x) paste(x, collapse = " | ")), collapse = "\n"))
+  # Keep only relevant columns
+  db24h <- db24h[, .(id, symbol, status, message, timestamp)]
+  
+  # Compute statistics (camelCase)
+  totalExecutions <- nrow(db24h)
+  successfulExecutions <- db24h[status == "ok", .N]
+  failedExecutions <- db24h[status != "ok", .N]
+  errorMessages <- db24h[status != "ok" & !is.na(message), unique(message)]
+  
+  # Build Markdown report
+  mdContent <- paste0(
+    "---\ntitle: \"Pipeline Logs Report\"\ndate: \"", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\"\noutput: html_document\n---\n\n",
+    
+    "# Pipeline Logs Report (Last 24 Hours)\n\n",
+    
+    "## Summary\n\n",
+    "- **Total number of executions:** ", totalExecutions, "\n",
+    "- **Number of successful executions:** ", successfulExecutions, "\n",
+    "- **Number of failed executions:** ", failedExecutions, "\n\n",
+    
+    "## Error Messages\n\n",
+    if (length(errorMessages) == 0) {
+      "- No errors recorded.\n"
     } else {
-      "\nAll executions successful!"
-    }
+      paste0("- ", paste(errorMessages, collapse = "\n- "), "\n")
+    },
+    
+    "\n## Detailed Logs\n\n"
   )
   
-  # Write the report
-  writeLines(report_text, con = output_file)
-  DBI::dbDisconnect(con)
-  message("Monitoring report successfully generated at: ", output_file)
+  # Generate Markdown table
+  if (totalExecutions > 0) {
+    header <- paste0("| ", paste(names(db24h), collapse = " | "), " |\n")
+    separator <- paste0("| ", paste(rep("---", ncol(db24h)), collapse = " | "), " |\n")
+    rows <- apply(db24h, 1, function(row) {
+      paste0("| ", paste(row, collapse = " | "), " |")
+    })
+    
+    tableMd <- paste0(header, separator, paste(rows, collapse = "\n"), "\n")
+    mdContent <- paste0(mdContent, tableMd)
+  } else {
+    mdContent <- paste0(mdContent, "_No executions in the last 24 hours._\n")
+  }
+  
+  # Write Markdown file
+  writeLines(mdContent, outputFile)
+  
+  # Render Markdown to HTML
+  htmlOutput <- sub("\\.md$", ".html", outputFile)
+  
+  
+  rmarkdown::render(
+    input = outputFile,
+    output_format = "html_document",
+    output_file = htmlOutput,
+    quiet = TRUE
+  )
+  
+  # file.rename("chemin/vers/fichier/source.txt", "chemin/vers/fichier/destination.txt")
+  # Return the filtered data invisibly
+  invisible(db24h)
 }
-
 
 # Code --------------------------------------------------------------------
 
 con <- pipelineR::connect_db()
-check_logs(con)
+checkLogs()
+
